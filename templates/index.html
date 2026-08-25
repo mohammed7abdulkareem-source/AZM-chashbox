@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <h1>صندوق شركة عزم الشرق</h1>
+  <p>إدارة دخول وخروج الأموال وكشف حركة الصندوق</p>
+</section>
+
+<section class="action-grid">
+  <a class="big-action in" href="{{ url_for('income') }}">
+    <span class="plus">+</span>
+    <strong>إدخال أموال</strong>
+    <small>إضافة مبلغ إلى الصندوق</small>
+  </a>
+  <a class="big-action out" href="{{ url_for('expense') }}">
+    <span class="minus">−</span>
+    <strong>خروج أموال</strong>
+    <small>تسجيل مبلغ خارج من الصندوق</small>
+  </a>
+</section>
+
+<section class="balance-grid">
+  <div class="balance-card">
+    <span>رصيد الصندوق - دولار</span>
+    <b>$ {{ format_money(usd_balance, "USD") }}</b>
+    <small>بتاريخ {{ today }}</small>
+  </div>
+  <div class="balance-card">
+    <span>رصيد الصندوق - عراقي</span>
+    <b>{{ format_money(iqd_balance, "IQD") }} د.ع</b>
+    <small>بتاريخ {{ today }}</small>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <div>
+      <h2>حركة الصندوق</h2>
+      <p>حدد الفترة المطلوبة ثم اعرض أو اسحب كشف PDF</p>
+    </div>
+  </div>
+
+  <form class="filter-form" method="get" action="{{ url_for('index') }}">
+    <label>من تاريخ
+      <input type="date" name="from" value="{{ date_from }}">
+    </label>
+    <label>إلى تاريخ
+      <input type="date" name="to" value="{{ date_to }}">
+    </label>
+    <div class="filter-buttons">
+      <button class="btn dark" type="submit">عرض الحركة</button>
+      <a class="btn light" href="{{ url_for('index') }}">إلغاء الفلتر</a>
+      <a class="btn pdf" href="{{ url_for('statement_pdf', from=date_from, to=date_to) }}">سحب كشف PDF</a>
+    </div>
+  </form>
+
+  <div class="summary-grid">
+    <div class="summary in">
+      <span>إدخال USD</span><b>$ {{ format_money(totals["USD_IN"], "USD") }}</b>
+    </div>
+    <div class="summary out">
+      <span>خروج USD</span><b>$ {{ format_money(totals["USD_OUT"], "USD") }}</b>
+    </div>
+    <div class="summary in">
+      <span>إدخال IQD</span><b>{{ format_money(totals["IQD_IN"], "IQD") }} د.ع</b>
+    </div>
+    <div class="summary out">
+      <span>خروج IQD</span><b>{{ format_money(totals["IQD_OUT"], "IQD") }} د.ع</b>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>التاريخ</th>
+          <th>الحركة</th>
+          <th>المبلغ</th>
+          <th>العملة</th>
+          <th>الشخص / المستلم</th>
+          <th>الزبون / الجهة</th>
+          <th>ملاحظات</th>
+          <th>حذف</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r["transaction_date"] }}</td>
+          <td>
+            {% if r["transaction_type"] == "IN" %}
+              <span class="tag tag-in">دخول</span>
+            {% else %}
+              <span class="tag tag-out">خروج</span>
+            {% endif %}
+          </td>
+          <td>{{ format_money(r["amount"], r["currency"]) }}</td>
+          <td>{{ r["currency"] }}</td>
+          <td>{{ r["person_name"] if r["transaction_type"] == "IN" else r["receiver_name"] }}</td>
+          <td>{{ r["related_customer"] if r["transaction_type"] == "IN" else r["destination"] }}</td>
+          <td>{{ r["notes"] or "" }}</td>
+          <td>
+            <form method="post" action="{{ url_for('delete_transaction', transaction_id=r['id']) }}" onsubmit="return confirmDelete()">
+              <button class="delete-btn" type="submit">حذف</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td class="empty" colspan="8">لا توجد حركات ضمن الفترة المحددة.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
