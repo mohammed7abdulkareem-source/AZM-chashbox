@@ -7,3 +7,5 @@ services:
     generateValue: true
   - key: SESSION_COOKIE_SECURE
     value: "1"
+  - key: DATABASE_URL
+    sync: false
