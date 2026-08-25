@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: azm-alsharq-cashbox
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: AZM_CASHBOX_DB
+        value: /var/data/azm_cashbox.db
+    disk:
+      name: azm-cashbox-data
+      mountPath: /var/data
+      sizeGB: 1
