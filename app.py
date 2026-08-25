@@ -1,458 +1,327 @@
 
-import io
-import os
-import sqlite3
+import io, os, sqlite3, secrets
 from pathlib import Path
-from datetime import datetime, date
-
-from flask import Flask, render_template, request, redirect, url_for, flash, send_file, jsonify
+from datetime import date, timedelta
+from functools import wraps
+from flask import Flask, render_template, request, redirect, url_for, flash, send_file, jsonify, session, abort
+from werkzeug.security import generate_password_hash, check_password_hash
 
 APP_NAME = "صندوق شركة عزم الشرق"
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get("AZM_CASHBOX_DB", str(BASE_DIR / "azm_cashbox.db")))
+DB_PATH = Path(os.environ.get("AZM_CASHBOX_DB", str(BASE_DIR/"azm_cashbox.db")))
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "azm-alsharq-cashbox-change-me")
+app.secret_key = os.environ.get("SECRET_KEY", "CHANGE-ME-AZM-CASHBOX-2026")
+app.config.update(
+    PERMANENT_SESSION_LIFETIME=timedelta(days=90),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE","1") == "1",
+)
 
-CURRENCIES = {
-    "USD": "دولار أمريكي",
-    "IQD": "دينار عراقي",
+ROLES = {
+    "ADMIN": "Admin - مدير",
+    "FULL": "Full User - مستخدم كامل",
+    "VIEW": "View Only - مشاهدة فقط",
 }
+CURRENCIES = {"USD":"دولار أمريكي","IQD":"دينار عراقي"}
 
-def get_conn():
+def conn():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    c=sqlite3.connect(DB_PATH, check_same_thread=False)
+    c.row_factory=sqlite3.Row
+    return c
 
 def init_db():
-    conn = get_conn()
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS transactions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        transaction_type TEXT NOT NULL CHECK(transaction_type IN ('IN','OUT')),
-        amount REAL NOT NULL CHECK(amount >= 0),
-        currency TEXT NOT NULL CHECK(currency IN ('USD','IQD')),
-        person_name TEXT,
-        related_customer TEXT,
-        destination TEXT,
-        receiver_name TEXT,
-        transaction_date TEXT NOT NULL,
-        notes TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    c=conn()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS users(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+      full_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('ADMIN','FULL','VIEW')),
+      active INTEGER NOT NULL DEFAULT 1,
+      last_login TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
-
-    CREATE INDEX IF NOT EXISTS idx_transactions_date
-    ON transactions(transaction_date);
-
-    CREATE INDEX IF NOT EXISTS idx_transactions_currency
-    ON transactions(currency);
-
-    CREATE INDEX IF NOT EXISTS idx_transactions_type
-    ON transactions(transaction_type);
+    CREATE TABLE IF NOT EXISTS transactions(
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      transaction_type TEXT NOT NULL CHECK(transaction_type IN ('IN','OUT')),
+      amount REAL NOT NULL CHECK(amount>0),
+      currency TEXT NOT NULL CHECK(currency IN ('USD','IQD')),
+      person_name TEXT,
+      related_customer TEXT,
+      destination TEXT,
+      receiver_name TEXT,
+      transaction_date TEXT NOT NULL,
+      notes TEXT,
+      created_by INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(created_by) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_tx_date ON transactions(transaction_date);
+    CREATE INDEX IF NOT EXISTS idx_tx_cur ON transactions(currency);
     """)
-    conn.commit()
-    conn.close()
-
+    if not c.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+        c.execute("""INSERT INTO users(username,full_name,password_hash,role,active)
+                     VALUES(?,?,?,?,1)""",
+                  ("admin","Administrator",generate_password_hash("Azm@2026"),"ADMIN"))
+    c.commit(); c.close()
 init_db()
 
-def balance(currency):
-    conn = get_conn()
-    row = conn.execute("""
-        SELECT COALESCE(SUM(
-            CASE WHEN transaction_type='IN' THEN amount ELSE -amount END
-        ), 0) AS balance
-        FROM transactions
-        WHERE currency=?
-    """, (currency,)).fetchone()
-    conn.close()
-    return float(row["balance"] or 0)
+def money(x,cur):
+    x=float(x or 0)
+    return f"{x:,.0f}" if cur=="IQD" else f"{x:,.2f}"
 
-def get_transactions(date_from=None, date_to=None):
-    q = "SELECT * FROM transactions WHERE 1=1"
-    params = []
-    if date_from:
-        q += " AND transaction_date >= ?"
-        params.append(date_from)
-    if date_to:
-        q += " AND transaction_date <= ?"
-        params.append(date_to)
-    q += " ORDER BY transaction_date DESC, id DESC"
-    conn = get_conn()
-    rows = conn.execute(q, params).fetchall()
-    conn.close()
-    return rows
+def balance(cur, before=None):
+    c=conn()
+    q="""SELECT COALESCE(SUM(CASE WHEN transaction_type='IN' THEN amount ELSE -amount END),0) b
+         FROM transactions WHERE currency=?"""
+    p=[cur]
+    if before:
+        q+=" AND transaction_date < ?"; p.append(before)
+    r=c.execute(q,p).fetchone(); c.close()
+    return float(r["b"] or 0)
 
-def format_money(amount, currency):
-    amount = float(amount or 0)
-    if currency == "IQD":
-        return f"{amount:,.0f}"
-    return f"{amount:,.2f}"
+def transactions(frm=None,to=None, running=True):
+    c=conn()
+    allrows=c.execute("SELECT * FROM transactions ORDER BY transaction_date ASC,id ASC").fetchall()
+    c.close()
+    bals={"USD":0.0,"IQD":0.0}; out=[]
+    for rr in allrows:
+        r=dict(rr)
+        signed=float(r["amount"])*(1 if r["transaction_type"]=="IN" else -1)
+        bals[r["currency"]]+=signed
+        r["balance_after"]=bals[r["currency"]]
+        if frm and r["transaction_date"]<frm: continue
+        if to and r["transaction_date"]>to: continue
+        out.append(r)
+    return list(reversed(out))
+
+def summary(frm=None,to=None):
+    rows=transactions(frm,to)
+    s={c:{"opening":balance(c,frm) if frm else 0.0,"in":0.0,"out":0.0,"closing":0.0} for c in CURRENCIES}
+    for r in rows:
+        s[r["currency"]]["in" if r["transaction_type"]=="IN" else "out"] += float(r["amount"])
+    for cur in CURRENCIES:
+        s[cur]["closing"]=s[cur]["opening"]+s[cur]["in"]-s[cur]["out"]
+        if not frm:
+            s[cur]["closing"]=balance(cur)
+    return s
+
+def current_user():
+    uid=session.get("uid")
+    if not uid: return None
+    c=conn(); u=c.execute("SELECT * FROM users WHERE id=? AND active=1",(uid,)).fetchone(); c.close()
+    return u
+
+@app.context_processor
+def inject():
+    return dict(current_user=current_user(), money=money, roles=ROLES, today=date.today().isoformat())
+
+def login_required(fn):
+    @wraps(fn)
+    def w(*a,**kw):
+        if not current_user(): return redirect(url_for("login",next=request.path))
+        return fn(*a,**kw)
+    return w
+
+def roles_required(*roles):
+    def deco(fn):
+        @wraps(fn)
+        def w(*a,**kw):
+            u=current_user()
+            if not u: return redirect(url_for("login"))
+            if u["role"] not in roles: abort(403)
+            return fn(*a,**kw)
+        return w
+    return deco
+
+@app.route("/login",methods=["GET","POST"])
+def login():
+    if current_user(): return redirect(url_for("index"))
+    if request.method=="POST":
+        username=request.form.get("username","").strip()
+        password=request.form.get("password","")
+        c=conn(); u=c.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE",(username,)).fetchone()
+        if u and u["active"] and check_password_hash(u["password_hash"],password):
+            session.clear(); session.permanent=True; session["uid"]=u["id"]
+            c.execute("UPDATE users SET last_login=CURRENT_TIMESTAMP WHERE id=?",(u["id"],)); c.commit(); c.close()
+            return redirect(url_for("index"))
+        c.close(); flash("اسم المستخدم أو الرقم السري غير صحيح.","error")
+    return render_template("login.html")
+
+@app.post("/logout")
+def logout():
+    session.clear(); return redirect(url_for("login"))
 
 @app.route("/")
+@login_required
 def index():
-    today = date.today().isoformat()
-    date_from = request.args.get("from", "")
-    date_to = request.args.get("to", "")
-    rows = get_transactions(date_from or None, date_to or None)
+    frm=request.args.get("from",""); to=request.args.get("to","")
+    rows=transactions(frm or None,to or None)
+    return render_template("index.html",rows=rows,frm=frm,to=to,
+                           usd=balance("USD"),iqd=balance("IQD"),summ=summary(frm or None,to or None))
 
-    totals = {"USD_IN": 0, "USD_OUT": 0, "IQD_IN": 0, "IQD_OUT": 0}
-    for r in rows:
-        key = f"{r['currency']}_{r['transaction_type']}"
-        totals[key] += float(r["amount"] or 0)
-
-    return render_template(
-        "index.html",
-        app_name=APP_NAME,
-        today=today,
-        usd_balance=balance("USD"),
-        iqd_balance=balance("IQD"),
-        rows=rows,
-        totals=totals,
-        date_from=date_from,
-        date_to=date_to,
-        format_money=format_money,
-    )
-
-@app.route("/income", methods=["GET", "POST"])
+@app.route("/income",methods=["GET","POST"])
+@roles_required("ADMIN","FULL")
 def income():
-    if request.method == "POST":
-        amount = request.form.get("amount", "").strip()
-        currency = request.form.get("currency", "").strip()
-        person_name = request.form.get("person_name", "").strip()
-        related_customer = request.form.get("related_customer", "").strip()
-        transaction_date = request.form.get("transaction_date", "").strip()
-        notes = request.form.get("notes", "").strip()
+    if request.method=="POST":
+        try: amount=float(request.form["amount"])
+        except: amount=0
+        cur=request.form.get("currency"); person=request.form.get("person_name","").strip()
+        customer=request.form.get("related_customer","").strip(); dt=request.form.get("transaction_date") or date.today().isoformat()
+        notes=request.form.get("notes","").strip()
+        if amount<=0 or cur not in CURRENCIES or not person:
+            flash("تأكد من المبلغ والعملة واسم الشخص.","error")
+        else:
+            c=conn(); c.execute("""INSERT INTO transactions
+            (transaction_type,amount,currency,person_name,related_customer,transaction_date,notes,created_by)
+            VALUES('IN',?,?,?,?,?,?,?)""",(amount,cur,person,customer,dt,notes,current_user()["id"]))
+            c.commit(); c.close(); flash("تم إدخال الأموال وتحديث الرصيد.","success"); return redirect(url_for("index"))
+    return render_template("income.html",usd=balance("USD"),iqd=balance("IQD"))
 
-        try:
-            amount_value = float(amount)
-        except Exception:
-            flash("قيمة المبلغ غير صحيحة.", "error")
-            return redirect(url_for("income"))
-
-        if amount_value <= 0:
-            flash("المبلغ يجب أن يكون أكبر من صفر.", "error")
-            return redirect(url_for("income"))
-        if currency not in CURRENCIES:
-            flash("العملة غير صحيحة.", "error")
-            return redirect(url_for("income"))
-        if not person_name:
-            flash("اكتب اسم الشخص المستلم.", "error")
-            return redirect(url_for("income"))
-        if not transaction_date:
-            transaction_date = date.today().isoformat()
-
-        conn = get_conn()
-        conn.execute("""
-            INSERT INTO transactions
-            (transaction_type, amount, currency, person_name, related_customer,
-             transaction_date, notes)
-            VALUES ('IN', ?, ?, ?, ?, ?, ?)
-        """, (amount_value, currency, person_name, related_customer, transaction_date, notes))
-        conn.commit()
-        conn.close()
-
-        flash("تمت إضافة الأموال إلى الصندوق.", "success")
-        return redirect(url_for("index"))
-
-    return render_template(
-        "income.html",
-        app_name=APP_NAME,
-        today=date.today().isoformat(),
-        currencies=CURRENCIES,
-    )
-
-@app.route("/expense", methods=["GET", "POST"])
+@app.route("/expense",methods=["GET","POST"])
+@roles_required("ADMIN","FULL")
 def expense():
-    if request.method == "POST":
-        amount = request.form.get("amount", "").strip()
-        currency = request.form.get("currency", "").strip()
-        destination = request.form.get("destination", "").strip()
-        receiver_name = request.form.get("receiver_name", "").strip()
-        transaction_date = request.form.get("transaction_date", "").strip()
-        notes = request.form.get("notes", "").strip()
+    if request.method=="POST":
+        try: amount=float(request.form["amount"])
+        except: amount=0
+        cur=request.form.get("currency"); dest=request.form.get("destination","").strip()
+        receiver=request.form.get("receiver_name","").strip(); dt=request.form.get("transaction_date") or date.today().isoformat()
+        notes=request.form.get("notes","").strip()
+        if amount<=0 or cur not in CURRENCIES or not dest or not receiver:
+            flash("تأكد من المبلغ والعملة والجهة والمستلم.","error")
+        else:
+            c=conn(); c.execute("""INSERT INTO transactions
+            (transaction_type,amount,currency,destination,receiver_name,transaction_date,notes,created_by)
+            VALUES('OUT',?,?,?,?,?,?,?)""",(amount,cur,dest,receiver,dt,notes,current_user()["id"]))
+            c.commit(); c.close()
+            flash(f"تم تسجيل الخروج. الرصيد الحالي: {money(balance(cur),cur)} {cur}","success")
+            return redirect(url_for("index"))
+    return render_template("expense.html",usd=balance("USD"),iqd=balance("IQD"))
 
-        try:
-            amount_value = float(amount)
-        except Exception:
-            flash("قيمة المبلغ غير صحيحة.", "error")
-            return redirect(url_for("expense"))
-
-        if amount_value <= 0:
-            flash("المبلغ يجب أن يكون أكبر من صفر.", "error")
-            return redirect(url_for("expense"))
-        if currency not in CURRENCIES:
-            flash("العملة غير صحيحة.", "error")
-            return redirect(url_for("expense"))
-        if not destination:
-            flash("اكتب جهة خروج الأموال.", "error")
-            return redirect(url_for("expense"))
-        if not receiver_name:
-            flash("اكتب اسم المستلم.", "error")
-            return redirect(url_for("expense"))
-        if not transaction_date:
-            transaction_date = date.today().isoformat()
-
-        current_balance = balance(currency)
-        if amount_value > current_balance:
-            flash(
-                f"تنبيه: المبلغ أكبر من رصيد الصندوق الحالي ({format_money(current_balance, currency)} {currency}). "
-                "تم تسجيل العملية كما طلبت.",
-                "warning"
-            )
-
-        conn = get_conn()
-        conn.execute("""
-            INSERT INTO transactions
-            (transaction_type, amount, currency, destination, receiver_name,
-             transaction_date, notes)
-            VALUES ('OUT', ?, ?, ?, ?, ?, ?)
-        """, (amount_value, currency, destination, receiver_name, transaction_date, notes))
-        conn.commit()
-        conn.close()
-
-        flash("تم تسجيل خروج الأموال من الصندوق.", "success")
-        return redirect(url_for("index"))
-
-    return render_template(
-        "expense.html",
-        app_name=APP_NAME,
-        today=date.today().isoformat(),
-        currencies=CURRENCIES,
-    )
-
-@app.post("/delete/<int:transaction_id>")
-def delete_transaction(transaction_id):
-    conn = get_conn()
-    row = conn.execute("SELECT id FROM transactions WHERE id=?", (transaction_id,)).fetchone()
-    if row:
-        conn.execute("DELETE FROM transactions WHERE id=?", (transaction_id,))
-        conn.commit()
-        flash("تم حذف العملية.", "success")
-    else:
-        flash("العملية غير موجودة.", "error")
-    conn.close()
+@app.post("/delete/<int:tid>")
+@roles_required("ADMIN","FULL")
+def delete_tx(tid):
+    c=conn(); c.execute("DELETE FROM transactions WHERE id=?",(tid,)); c.commit(); c.close()
+    flash("تم حذف الحركة وإعادة احتساب الرصيد.","success")
     return redirect(request.referrer or url_for("index"))
 
-def arabic_pdf_text(text):
-    text = str(text or "")
+@app.route("/users")
+@roles_required("ADMIN")
+def users():
+    c=conn(); rows=c.execute("SELECT * FROM users ORDER BY id").fetchall(); c.close()
+    return render_template("users.html",users=rows)
+
+@app.route("/users/add",methods=["POST"])
+@roles_required("ADMIN")
+def add_user():
+    username=request.form.get("username","").strip(); full=request.form.get("full_name","").strip()
+    pw=request.form.get("password",""); role=request.form.get("role")
+    if not username or not full or len(pw)<6 or role not in ROLES:
+        flash("أكمل البيانات، والرقم السري 6 أحرف على الأقل.","error"); return redirect(url_for("users"))
+    try:
+        c=conn(); c.execute("INSERT INTO users(username,full_name,password_hash,role) VALUES(?,?,?,?)",
+                           (username,full,generate_password_hash(pw),role)); c.commit(); c.close()
+        flash("تمت إضافة المستخدم.","success")
+    except sqlite3.IntegrityError:
+        flash("اسم المستخدم موجود مسبقاً.","error")
+    return redirect(url_for("users"))
+
+@app.post("/users/<int:uid>/toggle")
+@roles_required("ADMIN")
+def toggle_user(uid):
+    if uid==current_user()["id"]:
+        flash("لا يمكنك إيقاف حسابك الحالي.","error"); return redirect(url_for("users"))
+    c=conn(); u=c.execute("SELECT active FROM users WHERE id=?",(uid,)).fetchone()
+    if u: c.execute("UPDATE users SET active=? WHERE id=?",(0 if u["active"] else 1,uid)); c.commit()
+    c.close(); return redirect(url_for("users"))
+
+@app.post("/users/<int:uid>/password")
+@roles_required("ADMIN")
+def user_password(uid):
+    pw=request.form.get("password","")
+    if len(pw)<6: flash("الرقم السري يجب أن يكون 6 أحرف على الأقل.","error")
+    else:
+        c=conn(); c.execute("UPDATE users SET password_hash=? WHERE id=?",(generate_password_hash(pw),uid)); c.commit(); c.close()
+        flash("تم تغيير الرقم السري.","success")
+    return redirect(url_for("users"))
+
+@app.post("/users/<int:uid>/delete")
+@roles_required("ADMIN")
+def delete_user(uid):
+    if uid==current_user()["id"]:
+        flash("لا يمكنك حذف حسابك الحالي.","error"); return redirect(url_for("users"))
+    c=conn(); c.execute("DELETE FROM users WHERE id=?",(uid,)); c.commit(); c.close()
+    flash("تم حذف المستخدم.","success"); return redirect(url_for("users"))
+
+def arabic(s):
     try:
         import arabic_reshaper
         from bidi.algorithm import get_display
-        return get_display(arabic_reshaper.reshape(text))
-    except Exception:
-        return text
+        return get_display(arabic_reshaper.reshape(str(s or "")))
+    except: return str(s or "")
 
-def find_arabic_font():
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/tahoma.ttf",
-    ]
-    for p in candidates:
-        if os.path.exists(p):
-            return p
-    return None
-
-@app.route("/statement.pdf")
-def statement_pdf():
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+def font_setup():
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
+    for p in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf","/usr/share/fonts/truetype/freefont/FreeSans.ttf"]:
+        if os.path.exists(p):
+            try: pdfmetrics.registerFont(TTFont("AzmArabic",p)); return "AzmArabic"
+            except: pass
+    return "Helvetica"
 
-    date_from = request.args.get("from", "")
-    date_to = request.args.get("to", "")
-    rows = get_transactions(date_from or None, date_to or None)
-
-    font_name = "Helvetica"
-    font_path = find_arabic_font()
-    if font_path:
-        try:
-            pdfmetrics.registerFont(TTFont("AzmArabic", font_path))
-            font_name = "AzmArabic"
-        except Exception:
-            pass
-
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        rightMargin=25,
-        leftMargin=25,
-        topMargin=30,
-        bottomMargin=30,
-        title="Azm Alsharq Cashbox Statement",
-    )
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ArabicTitle",
-        parent=styles["Title"],
-        fontName=font_name,
-        fontSize=17,
-        leading=22,
-        alignment=TA_CENTER,
-        spaceAfter=8,
-    )
-    normal_right = ParagraphStyle(
-        "ArabicRight",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=9,
-        leading=13,
-        alignment=TA_RIGHT,
-    )
-
-    story = []
-    story.append(Paragraph(arabic_pdf_text("شركة عزم الشرق - كشف حساب الصندوق"), title_style))
-
-    period_text = "جميع الحركات"
-    if date_from or date_to:
-        period_text = f"الفترة: {date_from or 'البداية'} إلى {date_to or 'اليوم'}"
-    story.append(Paragraph(arabic_pdf_text(period_text), normal_right))
-    story.append(Paragraph(arabic_pdf_text(f"تاريخ إصدار الكشف: {date.today().isoformat()}"), normal_right))
-    story.append(Spacer(1, 12))
-
-    balances_data = [
-        [arabic_pdf_text("الرصيد الحالي"), arabic_pdf_text("العملة")],
-        [format_money(balance("USD"), "USD"), "USD"],
-        [format_money(balance("IQD"), "IQD"), "IQD"],
-    ]
-    bt = Table(balances_data, colWidths=[170, 100], hAlign="RIGHT")
-    bt.setStyle(TableStyle([
-        ("FONTNAME", (0,0), (-1,-1), font_name),
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#E5E7EB")),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#9CA3AF")),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("FONTSIZE", (0,0), (-1,-1), 9),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-        ("TOPPADDING", (0,0), (-1,-1), 6),
-    ]))
-    story.append(bt)
-    story.append(Spacer(1, 14))
-
-    headers = [
-        arabic_pdf_text("التاريخ"),
-        arabic_pdf_text("الحركة"),
-        arabic_pdf_text("المبلغ"),
-        arabic_pdf_text("العملة"),
-        arabic_pdf_text("الشخص/المستلم"),
-        arabic_pdf_text("الزبون/الجهة"),
-        arabic_pdf_text("ملاحظات"),
-    ]
-    data = [headers]
-
-    for r in rows:
-        is_in = r["transaction_type"] == "IN"
-        person = r["person_name"] if is_in else r["receiver_name"]
-        party = r["related_customer"] if is_in else r["destination"]
-        movement = "دخول" if is_in else "خروج"
-        data.append([
-            str(r["transaction_date"]),
-            arabic_pdf_text(movement),
-            format_money(r["amount"], r["currency"]),
-            r["currency"],
-            arabic_pdf_text(person or ""),
-            arabic_pdf_text(party or ""),
-            arabic_pdf_text(r["notes"] or ""),
-        ])
-
-    if len(data) == 1:
-        data.append(["-", arabic_pdf_text("لا توجد حركات"), "-", "-", "-", "-", "-"])
-
-    table = Table(
-        data,
-        repeatRows=1,
-        colWidths=[65, 48, 65, 42, 85, 92, 105],
-    )
-    table.setStyle(TableStyle([
-        ("FONTNAME", (0,0), (-1,-1), font_name),
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#111827")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("GRID", (0,0), (-1,-1), 0.35, colors.HexColor("#9CA3AF")),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("ALIGN", (0,0), (-1,-1), "CENTER"),
-        ("FONTSIZE", (0,0), (-1,-1), 7.2),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-        ("TOPPADDING", (0,0), (-1,-1), 5),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F9FAFB")]),
-    ]))
-
-    # Highlight money-in and money-out rows
-    for idx, r in enumerate(rows, start=1):
-        if r["transaction_type"] == "IN":
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (1,idx), (1,idx), colors.HexColor("#DCFCE7"))
-            ]))
-        else:
-            table.setStyle(TableStyle([
-                ("BACKGROUND", (1,idx), (1,idx), colors.HexColor("#FEE2E2"))
-            ]))
-
-    story.append(table)
-    doc.build(story)
-    buf.seek(0)
-
-    filename = f"Azm_Alsharq_Cashbox_{date_from or 'start'}_{date_to or date.today().isoformat()}.pdf"
-    return send_file(
-        buf,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/pdf",
-    )
+@app.route("/statement.pdf")
+@login_required
+def statement_pdf():
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate,Table,TableStyle,Paragraph,Spacer
+    from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER
+    frm=request.args.get("from",""); to=request.args.get("to","")
+    rows=transactions(frm or None,to or None); sm=summary(frm or None,to or None); font=font_setup()
+    b=io.BytesIO(); doc=SimpleDocTemplate(b,pagesize=landscape(A4),rightMargin=18,leftMargin=18,topMargin=22,bottomMargin=18)
+    styles=getSampleStyleSheet(); title=ParagraphStyle("t",parent=styles["Title"],fontName=font,alignment=TA_CENTER)
+    story=[Paragraph(arabic("شركة عزم الشرق - كشف حساب الصندوق"),title),
+           Paragraph(arabic(f"الفترة: {frm or 'البداية'} إلى {to or date.today().isoformat()}"),title),Spacer(1,10)]
+    sd=[[arabic("العملة"),arabic("الرصيد الافتتاحي"),arabic("إجمالي الدخول"),arabic("إجمالي الخروج"),arabic("الرصيد النهائي")]]
+    for cur in ("USD","IQD"):
+        x=sm[cur]; sd.append([cur,money(x["opening"],cur),money(x["in"],cur),money(x["out"],cur),money(x["closing"],cur)])
+    st=Table(sd,colWidths=[90,120,120,120,120]); st.setStyle(TableStyle([
+        ("FONTNAME",(0,0),(-1,-1),font),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.5,colors.grey),("ALIGN",(0,0),(-1,-1),"CENTER")
+    ])); story += [st,Spacer(1,12)]
+    data=[[arabic(x) for x in ["التاريخ","الحركة","المبلغ","العملة","الشخص/المستلم","الزبون/الجهة","الرصيد بعد العملية","ملاحظات"]]]
+    for r in reversed(rows):
+        data.append([r["transaction_date"],arabic("دخول" if r["transaction_type"]=="IN" else "خروج"),
+                     money(r["amount"],r["currency"]),r["currency"],
+                     arabic(r["person_name"] if r["transaction_type"]=="IN" else r["receiver_name"]),
+                     arabic(r["related_customer"] if r["transaction_type"]=="IN" else r["destination"]),
+                     money(r["balance_after"],r["currency"]),arabic(r["notes"] or "")])
+    if len(data)==1: data.append(["-",arabic("لا توجد حركات"),"-","-","-","-","-","-"])
+    t=Table(data,repeatRows=1,colWidths=[70,55,75,45,105,110,90,130]); t.setStyle(TableStyle([
+        ("FONTNAME",(0,0),(-1,-1),font),("FONTSIZE",(0,0),(-1,-1),7),
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("GRID",(0,0),(-1,-1),.35,colors.grey),("ALIGN",(0,0),(-1,-1),"CENTER"),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F7F7F7")])
+    ])); story.append(t); doc.build(story); b.seek(0)
+    return send_file(b,as_attachment=True,download_name=f"Azm_Cashbox_{frm or 'start'}_{to or date.today()}.pdf",mimetype="application/pdf")
 
 @app.route("/manifest.webmanifest")
 def manifest():
-    return jsonify({
-        "name": APP_NAME,
-        "short_name": "عزم الشرق",
-        "start_url": "/",
-        "display": "standalone",
-        "background_color": "#f4f6f8",
-        "theme_color": "#111827",
-        "lang": "ar",
-        "dir": "rtl",
-        "icons": [
-            {
-                "src": "/static/icon.svg",
-                "sizes": "any",
-                "type": "image/svg+xml",
-                "purpose": "any maskable"
-            }
-        ]
-    })
+    return jsonify({"name":APP_NAME,"short_name":"عزم الشرق","start_url":"/","display":"standalone",
+                    "background_color":"#f4f6f8","theme_color":"#111827","lang":"ar","dir":"rtl",
+                    "icons":[{"src":"/static/icon.svg","sizes":"any","type":"image/svg+xml"}]})
 
 @app.route("/service-worker.js")
-def service_worker():
-    content = """
-const CACHE = 'azm-cashbox-v1';
-const CORE = ['/', '/static/style.css', '/static/icon.svg'];
-self.addEventListener('install', event => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(CORE)));
-});
-self.addEventListener('activate', event => {
-  event.waitUntil(self.clients.claim());
-});
-self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
-  event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
-  );
-});
-"""
-    return app.response_class(content, mimetype="application/javascript")
+def sw():
+    return app.response_class("self.addEventListener('fetch',e=>{e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)))})",mimetype="application/javascript")
 
 @app.route("/health")
-def health():
-    return {"status": "ok", "app": APP_NAME}
+def health(): return {"status":"ok"}
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8501"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__=="__main__":
+    app.run(host="0.0.0.0",port=int(os.environ.get("PORT","8501")),debug=False)
