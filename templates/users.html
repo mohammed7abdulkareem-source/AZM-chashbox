@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block content %}<section class="panel"><h1>إدارة المستخدمين</h1>
+<div class="useradd"><h3>إضافة مستخدم</h3><form method="post" action="/users/add" class="entry">
+<label>اسم المستخدم<input name="username" required></label><label>الاسم الكامل<input name="full_name" required></label>
+<label>الرقم السري<input type="password" name="password" minlength="6" required></label><label>الصلاحية<select name="role">{% for k,v in roles.items() %}<option value="{{k}}">{{v}}</option>{% endfor %}</select></label>
+<div class="wide"><button class="btn dark">إضافة المستخدم</button></div></form></div>
+<div class="tablewrap"><table><thead><tr><th>المستخدم</th><th>الاسم</th><th>الصلاحية</th><th>الحالة</th><th>آخر دخول</th><th>كلمة السر</th><th>إيقاف</th><th>حذف</th></tr></thead><tbody>
+{% for u in users %}<tr><td>{{u.username}}</td><td>{{u.full_name}}</td><td>{{roles[u.role]}}</td><td>{{"فعال" if u.active else "موقوف"}}</td><td>{{u.last_login or "-"}}</td>
+<td><form method="post" action="/users/{{u.id}}/password" class="inline"><input type="password" name="password" placeholder="رقم سري جديد" minlength="6"><button>تغيير</button></form></td>
+<td><form method="post" action="/users/{{u.id}}/toggle"><button>{{"إيقاف" if u.active else "تفعيل"}}</button></form></td>
+<td><form method="post" action="/users/{{u.id}}/delete" onsubmit="return delok()"><button class="del">حذف</button></form></td></tr>{% endfor %}</tbody></table></div></section>{% endblock %}

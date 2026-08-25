@@ -1,45 +1,7 @@
-{% extends "base.html" %}
-{% block title %}خروج أموال - {{ app_name }}{% endblock %}
-{% block content %}
-<section class="form-card">
-  <div class="form-title expense-title">
-    <span>−</span>
-    <div><h1>خروج أموال</h1><p>تسجيل مبلغ خارج من صندوق الشركة</p></div>
-  </div>
-
-  <form method="post" class="entry-form">
-    <label>قيمة المبلغ *
-      <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required placeholder="0">
-    </label>
-
-    <label>العملة *
-      <select name="currency" required>
-        {% for code, label in currencies.items() %}
-          <option value="{{ code }}">{{ code }} - {{ label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-
-    <label>خروج إلى أي جهة *
-      <input name="destination" type="text" required placeholder="اسم الجهة أو سبب الصرف">
-    </label>
-
-    <label>من المستلم *
-      <input name="receiver_name" type="text" required placeholder="اسم الشخص الذي استلم المبلغ">
-    </label>
-
-    <label>التاريخ *
-      <input name="transaction_date" type="date" value="{{ today }}" required>
-    </label>
-
-    <label>ملاحظات
-      <textarea name="notes" rows="3" placeholder="أي ملاحظة إضافية"></textarea>
-    </label>
-
-    <div class="form-actions">
-      <button class="btn out-btn" type="submit">تسجيل خروج الأموال</button>
-      <a class="btn light" href="{{ url_for('index') }}">رجوع</a>
-    </div>
-  </form>
-</section>
-{% endblock %}
+{% extends "base.html" %}{% block content %}<section class="formcard"><h1>خروج أموال</h1>
+<div class="minibals"><div><span>USD الحالي</span><b>$ {{money(usd,"USD")}}</b></div><div><span>IQD الحالي</span><b>{{money(iqd,"IQD")}} د.ع</b></div></div>
+<form method="post" class="entry"><label>قيمة المبلغ *<input type="number" step="0.01" min="0.01" name="amount" required></label>
+<label>العملة *<select name="currency"><option value="USD">USD - دولار</option><option value="IQD">IQD - دينار عراقي</option></select></label>
+<label>خروج إلى أي جهة *<input name="destination" required></label><label>من المستلم *<input name="receiver_name" required></label>
+<label>التاريخ *<input type="date" name="transaction_date" value="{{today}}" required></label><label class="wide">ملاحظات<textarea name="notes" rows="3"></textarea></label>
+<div class="wide buttons"><button class="btn red">حفظ العملية</button><a class="btn light" href="/">رجوع</a></div></form></section>{% endblock %}

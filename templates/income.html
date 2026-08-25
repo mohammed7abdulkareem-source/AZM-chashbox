@@ -1,45 +1,7 @@
-{% extends "base.html" %}
-{% block title %}إدخال أموال - {{ app_name }}{% endblock %}
-{% block content %}
-<section class="form-card">
-  <div class="form-title income-title">
-    <span>+</span>
-    <div><h1>إدخال أموال</h1><p>إضافة مبلغ جديد إلى صندوق الشركة</p></div>
-  </div>
-
-  <form method="post" class="entry-form">
-    <label>قيمة المبلغ *
-      <input name="amount" type="number" step="0.01" min="0.01" inputmode="decimal" required placeholder="0">
-    </label>
-
-    <label>العملة *
-      <select name="currency" required>
-        {% for code, label in currencies.items() %}
-          <option value="{{ code }}">{{ code }} - {{ label }}</option>
-        {% endfor %}
-      </select>
-    </label>
-
-    <label>اسم الشخص المستلم *
-      <input name="person_name" type="text" required placeholder="اسم الشخص الذي استلم/أدخل المبلغ">
-    </label>
-
-    <label>تابع لأي زبون
-      <input name="related_customer" type="text" placeholder="اسم الزبون أو الحساب المرتبط">
-    </label>
-
-    <label>التاريخ *
-      <input name="transaction_date" type="date" value="{{ today }}" required>
-    </label>
-
-    <label>ملاحظات
-      <textarea name="notes" rows="3" placeholder="أي ملاحظة إضافية"></textarea>
-    </label>
-
-    <div class="form-actions">
-      <button class="btn in-btn" type="submit">إضافة إلى الصندوق</button>
-      <a class="btn light" href="{{ url_for('index') }}">رجوع</a>
-    </div>
-  </form>
-</section>
-{% endblock %}
+{% extends "base.html" %}{% block content %}<section class="formcard"><h1>إدخال أموال</h1>
+<div class="minibals"><div><span>USD الحالي</span><b>$ {{money(usd,"USD")}}</b></div><div><span>IQD الحالي</span><b>{{money(iqd,"IQD")}} د.ع</b></div></div>
+<form method="post" class="entry"><label>قيمة المبلغ *<input type="number" step="0.01" min="0.01" name="amount" required></label>
+<label>العملة *<select name="currency"><option value="USD">USD - دولار</option><option value="IQD">IQD - دينار عراقي</option></select></label>
+<label>اسم الشخص المستلم *<input name="person_name" required></label><label>تابع لأي زبون<input name="related_customer"></label>
+<label>التاريخ *<input type="date" name="transaction_date" value="{{today}}" required></label><label class="wide">ملاحظات<textarea name="notes" rows="3"></textarea></label>
+<div class="wide buttons"><button class="btn green">حفظ العملية</button><a class="btn light" href="/">رجوع</a></div></form></section>{% endblock %}
